@@ -8,6 +8,7 @@ import (
 
 	"github.com/sonroyaalmerol/go-smb-server/smb/auth"
 	"github.com/sonroyaalmerol/go-smb-server/smb/encryption"
+	"github.com/sonroyaalmerol/go-smb-server/smb/ntlmssp"
 	"github.com/sonroyaalmerol/go-smb-server/smb/signing"
 	"github.com/sonroyaalmerol/go-smb-server/smb/vfs"
 	"github.com/sonroyaalmerol/go-smb-server/smb/wire"
@@ -107,6 +108,9 @@ func (c *conn) handleNegotiate(msg []byte, hdr *wire.Header) uint32 {
 	}
 
 	resp := wire.NegotiateResponse{
+		// 协商响应里必须带 SPNEGO 机制列表：Windows 靠它决定能谈什么认证，
+		// 缺了就掉头走人（客户端表现为「找不到网络路径」）。见 ntlmssp.MechListToken。
+		SecurityBuffer:  ntlmssp.MechListToken(),
 		SecurityMode:    wire.SigningEnabled,
 		DialectRevision: dialect,
 		ServerGuid:      c.srv.guid,

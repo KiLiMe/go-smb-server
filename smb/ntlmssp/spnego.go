@@ -168,3 +168,23 @@ func rc4Decrypt(key, ciphertext []byte) []byte {
 func ctEqual(a, b []byte) bool {
 	return subtle.ConstantTimeCompare(a, b) == 1
 }
+
+// MechListToken 返回协商响应里该带的那段 SPNEGO 初始令牌：只声明 NTLMSSP 一个机制。
+//
+// Windows 客户端拿它判断服务端支持哪些认证机制；缺了这段（SecurityBufferLength=0），
+// 它会直接放弃这条连接。samba 的 smbclient 则容忍缺失，所以本机测不出这个问题。
+func MechListToken() []byte {
+	oid, err := asn1.Marshal(ntlmOID)
+	if err != nil {
+		return nil
+	}
+	spnegoOID, err := asn1.Marshal(asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 2})
+	if err != nil {
+		return nil
+	}
+	mechList := wrapDER(0x30, oid)           // SEQUENCE OF MechType
+	mechTypes := wrapDER(0xA0, mechList)     // [0] mechTypes
+	negTokenInit := wrapDER(0x30, mechTypes) // NegTokenInit
+	choice := wrapDER(0xA0, negTokenInit)    // CHOICE negTokenInit [0]
+	return wrapDER(0x60, append(spnegoOID, choice...))
+}

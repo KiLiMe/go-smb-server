@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 )
 
 const (
@@ -50,6 +51,9 @@ func (f *FramedConn) ReadMessage() ([]byte, error) {
 	}
 	if f.firstFrame {
 		f.firstFrame = false
+		if debugSMB1() {
+			fmt.Fprintf(os.Stderr, "[smb] 首帧 %d 字节：%x\n%s", len(msg), msg, smb1ParseReport(msg))
+		}
 		if upgraded, ok := upgradeSMB1Negotiate(msg); ok {
 			return upgraded, nil
 		}

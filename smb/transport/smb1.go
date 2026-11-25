@@ -109,6 +109,32 @@ func appendDialect(out []uint16, d uint16) []uint16 {
 	return append(out, d)
 }
 
+// smb1ParseReport 把首帧的解析结果说清楚，只在 SMBDEMO_DEBUG_SMB1 打开时用。
+func smb1ParseReport(msg []byte) string {
+	if len(msg) < 4 {
+		return fmt.Sprintf("  只有 %d 字节，连协议标记都没有\n", len(msg))
+	}
+	proto := ""
+	switch string(msg[0:4]) {
+	case smb1ProtocolID:
+		proto = "SMB1"
+	case "\xfeSMB":
+		proto = "SMB2（原生的，垫片不管）"
+	default:
+		proto = fmt.Sprintf("不认识的 % x", msg[0:4])
+	}
+	if proto != "SMB1" {
+		return "  协议：" + proto + "\n"
+	}
+	if len(msg) < smb1DialectsOff {
+		return fmt.Sprintf("  协议：SMB1，但只有 %d 字节，读不到方言表\n", len(msg))
+	}
+	wc := msg[smb1HeaderLen]
+	bc := int(binary.LittleEndian.Uint16(msg[smb1HeaderLen+1:]))
+	return fmt.Sprintf("  协议：SMB1，cmd=0x%02x，WordCount=%d，ByteCount=%d，声明的方言 % x\n",
+		msg[4], wc, bc, smb1DeclaredDialects(msg))
+}
+
 // debugSMB1 打开后把客户端声明的方言打到 stderr，现场排查用（默认关）。
 func debugSMB1() bool { return os.Getenv("SMBDEMO_DEBUG_SMB1") != "" }
 

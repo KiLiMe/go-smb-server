@@ -5,10 +5,12 @@ import (
 	"crypto/rand"
 	"crypto/sha512"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -194,6 +196,7 @@ type conn struct {
 	out           []byte
 	sessions      map[uint64]*session
 	nextSess      uint64
+	dialect       uint16 // 协商出来的方言，会话建立时据此选签名算法
 	creditBalance uint32
 
 	nextAsync    uint64
@@ -273,6 +276,17 @@ func (s *Server) serveConn(ctx context.Context, c net.Conn) {
 			if sealed, ok := cn.maybeSealResponse(cn.out); ok {
 				cn.out = sealed
 			}
+			if os.Getenv("SMBDEMO_DEBUG_SMB1") != "" {
+				cmd := uint16(0)
+				if len(cn.out) > 14 {
+					cmd = uint16(cn.out[12]) | uint16(cn.out[13])<<8
+				}
+				var st uint32
+				if len(cn.out) > 12 {
+					st = binary.LittleEndian.Uint32(cn.out[8:12])
+				}
+				fmt.Fprintf(os.Stderr, "[out] cmd=0x%04x status=0x%08x %d 字节：%x\n", cmd, st, len(cn.out), cn.out)
+			}
 			if err := cn.fc.WriteMessage(cn.out); err != nil {
 				cn.log.Debug("write error", "err", err)
 				return
@@ -327,6 +341,9 @@ func (c *conn) handleMessage(ctx context.Context, msg []byte) {
 		if sess := c.getSession(hdr.SessionId); sess != nil && sess.signingKey != nil {
 			if hdr.Flags&wire.FlagSigned != 0 {
 				ok, vErr := signing.Verify(sub, sess.signingKey, sess.signingAlgo)
+				if os.Getenv("SMBDEMO_DEBUG_SMB1") != "" {
+					fmt.Fprintf(os.Stderr, "[verify] cmd=0x%04x algo=0x%04x ok=%v err=%v\n%s\n", hdr.Command, uint16(sess.signingAlgo), ok, vErr, hex.EncodeToString(sub))
+				}
 				if vErr != nil || !ok {
 					chainFailed = true
 					lastStatus = wire.StatusAccessDenied

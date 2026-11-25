@@ -10,8 +10,8 @@ import (
 // smb1Negotiate 造一个 SMB1 多协议协商请求（不带 4 字节帧头）。
 //
 // 头部的字段照 WinPE 实测的首包（flags2=0x5318、TID=0xFFFF、PID=0xFFFE）
-// 构造，方言表用《SMB 2.???》那个通配值——垫片不看它，这里只是让抓包形态一致。
-func smb1Negotiate(dialects ...uint16) []byte {
+// 构造；方言表是 <0x02><名字><NUL> 的字符串数组，不是 WORD 数组。
+func smb1Negotiate(dialects ...string) []byte {
 	hdr := make([]byte, 32)
 	copy(hdr[0:4], "\xffSMB")
 	hdr[4] = 0x72 // SMB_COM_NEGOTIATE
@@ -20,12 +20,15 @@ func smb1Negotiate(dialects ...uint16) []byte {
 	hdr[24], hdr[25] = 0xFF, 0xFF
 	hdr[26], hdr[27] = 0xFF, 0xFE
 
-	body := []byte{0} // WordCount = 0
-	body = append(body, byte(len(dialects)*2), 0)
+	var list []byte
 	for _, d := range dialects {
-		body = append(body, byte(d), byte(d>>8))
+		list = append(list, 0x02)
+		list = append(list, d...)
+		list = append(list, 0)
 	}
-	return append(hdr, body...)
+	body := []byte{0} // WordCount = 0
+	body = append(body, byte(len(list)), byte(len(list)>>8))
+	return append(append(hdr, body...), list...)
 }
 
 func frame(payload []byte) []byte {
@@ -34,7 +37,7 @@ func frame(payload []byte) []byte {
 }
 
 func TestUpgradeSMB1Negotiate(t *testing.T) {
-	got, ok := upgradeSMB1Negotiate(smb1Negotiate(0x02FF, 0xFFFF))
+	got, ok := upgradeSMB1Negotiate(smb1Negotiate("NT LM 0.12", "SMB 2.002", "SMB 2.???"))
 	if !ok {
 		t.Fatal("SMB1 NEGOTIATE 没有被认出来")
 	}
@@ -53,13 +56,14 @@ func TestUpgradeSMB1Negotiate(t *testing.T) {
 		t.Errorf("请求体 StructureSize = %d，想要 36", ss)
 	}
 	count := int(uint16(body[2]) | uint16(body[3])<<8)
-	if count != 4 {
-		t.Fatalf("DialectCount = %d，想要 4", count)
+	if count != 2 {
+		// 客户端只说「SMB 2.002」+「SMB 2.???」：通配符只承诺到 2.1。
+		t.Fatalf("DialectCount = %d，想要 2", count)
 	}
 	if mode := uint16(body[4]) | uint16(body[5])<<8; mode&0x0001 == 0 {
 		t.Error("SecurityMode 缺了 signing enabled（0x0001），Windows 应当拒绝")
 	}
-	want := []uint16{dialect202, dialect210, dialect300, dialect302}
+	want := []uint16{dialect202, dialect210}
 	for i, w := range want {
 		off := smb2NegotBody + 2*i
 		if d := uint16(body[off]) | uint16(body[off+1])<<8; d != w {
@@ -76,7 +80,7 @@ func TestUpgradeIgnoresOtherFrames(t *testing.T) {
 		"SMB2 协商": append([]byte{0xFE, 'S', 'M', 'B'}, make([]byte, 60)...),
 		"太短":      []byte{0xFF, 'S', 'M'},
 		"SMB1 非协商": func() []byte {
-			b := smb1Negotiate(0x02FF)
+			b := smb1Negotiate("NT LM 0.12", "SMB 2.002", "SMB 2.???")
 			b[4] = 0x73 // SESSION_SETUP
 			return b
 		}(),
@@ -95,7 +99,7 @@ func TestReadMessageUpgradesFirstFrameOnly(t *testing.T) {
 
 	fc := NewFramedConn(srv)
 	go func() {
-		_, _ = cli.Write(frame(smb1Negotiate(0x02FF)))
+		_, _ = cli.Write(frame(smb1Negotiate("NT LM 0.12", "SMB 2.002", "SMB 2.???")))
 		_, _ = cli.Write(frame([]byte{0xFE, 'S', 'M', 'B', 9, 9, 9, 9}))
 		cli.Close()
 	}()

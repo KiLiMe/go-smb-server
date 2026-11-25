@@ -149,3 +149,27 @@ func TestNTOWFv2KnownVector(t *testing.T) {
 		t.Fatal("NTOWFv2 collision across passwords")
 	}
 }
+
+// CHALLENGE 自报的标志位必须和它实际写的字节对得上：置了 NEGOTIATE_VERSION 就得有
+// Version 字段，否则 Windows 按偏移解析会失败（连接直接被丢弃）。
+func TestChallengeFlagsMatchWireLayout(t *testing.T) {
+	cm := ChallengeMessage{
+		Flags:      serverChallengeFlags,
+		TargetName: "SMBDEMO",
+		TargetInfo: buildTargetInfo("SMBDEMO"),
+	}
+	body, err := cm.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	flags := binary.LittleEndian.Uint32(body[20:24])
+	targetOff := binary.LittleEndian.Uint32(body[16:20])
+	hasVersion := flags&FlagNegotiateVersion != 0
+	wantOff := uint32(challengeFixedLen)
+	if hasVersion {
+		wantOff += 8
+	}
+	if targetOff != wantOff {
+		t.Errorf("TargetName 偏移 %d，按标志位应为 %d（Version 字段 %v）", targetOff, wantOff, hasVersion)
+	}
+}

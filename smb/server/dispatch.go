@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"os"
 	"strings"
 
 	"github.com/sonroyaalmerol/go-smb-server/smb/auth"
@@ -106,6 +108,10 @@ func (c *conn) handleNegotiate(msg []byte, hdr *wire.Header) uint32 {
 	if dialect == 0 {
 		return c.errBody(wire.StatusNotSupported)
 	}
+	c.dialect = dialect // 会话建立时要靠它选签名算法
+	if os.Getenv("SMBDEMO_DEBUG_SMB1") != "" {
+		fmt.Fprintf(os.Stderr, "[negotiate] 选中 0x%04x（客户端给 %04x）\n", dialect, req.Dialects)
+	}
 
 	resp := wire.NegotiateResponse{
 		// 协商响应里必须带 SPNEGO 机制列表：Windows 靠它决定能谈什么认证，
@@ -173,6 +179,9 @@ func (c *conn) handleSessionSetup(ctx context.Context, msg []byte, hdr *wire.Hea
 
 	result, err := sess.auth.Accept(ctx, req.SecurityBuffer)
 	if err != nil {
+		if os.Getenv("SMBDEMO_DEBUG_SMB1") != "" {
+			fmt.Fprintf(os.Stderr, "[auth] 失败（方言 0x%04x，token %d 字节）：%v\n", c.dialect, len(req.SecurityBuffer), err)
+		}
 		if errors.Is(err, auth.ErrLogonFailed) {
 			return c.errBody(wire.StatusLogonFailure)
 		}
@@ -188,11 +197,18 @@ func (c *conn) handleSessionSetup(ctx context.Context, msg []byte, hdr *wire.Hea
 	if result.Identity != nil {
 		sess.identity = result.Identity
 		sess.authenticated = true
-		sess.signingKey = signing.DeriveSigningKey(result.SessionKey)
-		sess.signingAlgo = signing.AlgoAESCMAC
-		sess.encryptionKey = encryption.DeriveServerEncryptionKey(result.SessionKey)
-		sess.decryptionKey = encryption.DeriveServerDecryptionKey(result.SessionKey)
-		sess.requireEncrypt = c.srv.requireEnc
+		if c.dialect >= wire.DialectSMB30 {
+			sess.signingKey = signing.DeriveSigningKey(result.SessionKey)
+			sess.signingAlgo = signing.AlgoAESCMAC
+			sess.encryptionKey = encryption.DeriveServerEncryptionKey(result.SessionKey)
+			sess.decryptionKey = encryption.DeriveServerDecryptionKey(result.SessionKey)
+			sess.requireEncrypt = c.srv.requireEnc
+		} else {
+			// SMB 2.0.2 / 2.1：签名密钥就是会话密钥本身（不跑 KDF），
+			// 算法固定 HMAC-SHA256。套 3.0 那一套，客户端会判签名不合法。
+			sess.signingKey = result.SessionKey
+			sess.signingAlgo = signing.AlgoHMACSHA256
+		}
 	}
 	c.out = ssr.Append(c.out)
 	if sess.authenticated {

@@ -38,6 +38,12 @@ const (
 	FlagNegotiate56          uint32 = 0x80000000
 )
 
+// serverChallengeFlags 是 CHALLENGE 里自报的协商标志。
+//
+// 不含 FlagNegotiateVersion：一旦置位，按 MS-NLMP 2.2.1.2 定长部分就要多出 8 字节
+// Version 字段（TargetName 的偏移从 56 变成 64），而 ChallengeMessage.Marshal 不写
+// 它。Windows 的 NTLM 解析按标志位校验偏移，对不上就整条 SPNEGO 作废、连接直接 RST
+// （Samba 的客户端不校验，所以本地一直看不出问题）。
 const serverChallengeFlags = FlagNegotiateUnicode |
 	FlagRequestTarget |
 	FlagNegotiateNTLM |
@@ -47,7 +53,6 @@ const serverChallengeFlags = FlagNegotiateUnicode |
 	FlagNegotiateExtSecurity |
 	FlagNegotiateTargetInfo |
 	FlagNegotiate128 |
-	FlagNegotiateVersion |
 	FlagNegotiateKeyExch
 
 func NTOWFv2(password, user, domain string) []byte {

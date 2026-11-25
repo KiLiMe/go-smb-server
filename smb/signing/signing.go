@@ -16,6 +16,9 @@ const (
 
 const headerSize = 64
 
+// zeroSignature 是签名字段（头 48:64）按零参与计算时的占位。
+var zeroSignature [16]byte
+
 var errShort = errors.New("signing: message shorter than header")
 
 type Signer struct {
@@ -121,8 +124,13 @@ func Sign(msg []byte, key []byte, algo Algorithm) error {
 	var sig [16]byte
 	switch algo {
 	case AlgoHMACSHA256:
+		// 签名字段必须先当零算（MS-SMB2 3.1.4.1）：验签时 msg[48:64] 里正躺着
+		// 对端的签名，直接整条喂进去必然不匹配。AES-CMAC 那条分支早就这么做了，
+		// HMAC 这条漏了。
 		mac := hmac.New(sha256.New, key)
-		mac.Write(msg)
+		mac.Write(msg[:48])
+		mac.Write(zeroSignature[:])
+		mac.Write(msg[64:])
 		copy(sig[:], mac.Sum(nil)[:16])
 	case AlgoAESCMAC:
 		s, err := NewSigner(key, algo)

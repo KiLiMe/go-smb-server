@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/binary"
 	"sync"
 
 	"github.com/sonroyaalmerol/go-smb-server/smb/vfs"
@@ -111,7 +112,7 @@ func (c *conn) handleIoctl(ctx context.Context, msg []byte, tr *tree) uint32 {
 	}
 	switch req.CtlCode {
 	case wire.FSCTLValidateNegotiateInfo:
-		resp := buildValidateNegotiateInfo(c.srv.dialect, c.srv.guid)
+		resp := buildValidateNegotiateInfo(c.dialect, c.srv.guid)
 		c.out = wire.IoctlResponseAppend(c.out, req.CtlCode, req.FileId, nil, resp, req.Flags)
 		return wire.StatusSuccess
 	case wire.FSCTLQueryNetworkInterfaceInfo:
@@ -142,15 +143,23 @@ func (c *conn) handleIoctl(ctx context.Context, msg []byte, tr *tree) uint32 {
 	}
 }
 
+// buildValidateNegotiateInfo 组 VALIDATE_NEGOTIATE_INFO 的响应：**必须是 24 字节**，
+// Capabilities(4) + Guid(16) + SecurityMode(1) + 保留(1) + Dialect(2)。
+//
+// 这里没有 DialectCount、只回**协商选中的那一个**方言——和 2.2.32.2 的请求结构不同，
+// 容易想当然。Samba 的校验（libcli/smb/smbXcli_base.c 的
+// smb2cli_validate_negotiate_info_recv）依次要求：output 长度正好 24、
+// capabilities/guid/security_mode 与协商响应一致、dialect 等于双方选中的那个；
+// 任何一项不符都是 NT_STATUS_ACCESS_DENIED，而调用点（libcli/smb/smb2cli_tcon.c:301）
+// 把它报成「tree connect failed」，看起来像树连接的问题。
+//
+// 原先发 26 字节（多了一个 DialectCount=1），长度就已经不对；Windows 更是直接丢连接。
 func buildValidateNegotiateInfo(dialect uint16, guid [16]byte) []byte {
 	out := make([]byte, 24)
-	for i := range 4 {
-		out[i] = byte(wire.CapLargeMTU >> (8 * i))
-	}
+	binary.LittleEndian.PutUint32(out[0:4], wire.CapLargeMTU)
 	copy(out[4:20], guid[:])
 	out[20] = byte(wire.SigningEnabled)
-	out[21] = 0
-	out[22] = byte(dialect)
-	out[23] = byte(dialect >> 8)
+	out[21] = 0 // 保留，必须为 0
+	binary.LittleEndian.PutUint16(out[22:24], dialect)
 	return out
 }

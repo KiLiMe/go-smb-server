@@ -1,6 +1,7 @@
 package signing
 
 import (
+	"bytes"
 	"crypto/aes"
 	"encoding/hex"
 	"testing"
@@ -95,4 +96,30 @@ func isZero(b []byte) bool {
 		}
 	}
 	return true
+}
+
+// 验签时 msg[48:64] 里躺着对端的签名：必须先当零再算，否则永远不匹配。
+func TestVerifyIgnoresSignatureField(t *testing.T) {
+	key := []byte("0123456789abcdef")
+	for _, algo := range []Algorithm{AlgoHMACSHA256, AlgoAESCMAC} {
+		msg := make([]byte, 64+8)
+		copy(msg[0:4], "\xfeSMB")
+		copy(msg[64:], "payload!")
+		// 先按零签名，然后把签名写进去——这正是线上收到的样子。
+		if err := Sign(msg, key, algo); err != nil {
+			t.Fatalf("%v: %v", algo, err)
+		}
+		signed := append([]byte(nil), msg...)
+		ok, err := Verify(signed, key, algo)
+		if err != nil || !ok {
+			t.Errorf("algo=0x%04x：自己的签名验不过（ok=%v err=%v）", algo, ok, err)
+		}
+		// 再来一次：字段里已有签名时重新签名，结果必须与第一次相同。
+		if err := Sign(signed, key, algo); err != nil {
+			t.Fatalf("%v: %v", algo, err)
+		}
+		if !bytes.Equal(msg[48:64], signed[48:64]) {
+			t.Errorf("algo=0x%04x：签名随字段里的旧值变了", algo)
+		}
+	}
 }

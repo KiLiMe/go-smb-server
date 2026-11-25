@@ -1,9 +1,11 @@
 package transport
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"os"
+	"sort"
 )
 
 // SMB1 多协议协商的垫片。
@@ -62,30 +64,55 @@ func upgradeSMB1Negotiate(msg []byte) ([]byte, bool) {
 		return nil, false
 	}
 	if debugSMB1() {
-		fmt.Fprintf(os.Stderr, "[smb1] 客户端声明 % x → 提交 % x\n", smb1DeclaredDialects(msg), dialects)
+		fmt.Fprintf(os.Stderr, "[smb1] 客户端声明 %q → 提交 % x\n", smb1DeclaredDialects(msg), dialects)
 	}
 	return buildSMB2Negotiate(dialects), true
 }
 
 // smb1SMB2Dialects 挑出客户端声明过的 SMB2 方言，按升序去重。
-// 「SMB 2.???」通配展开成整条阶梯。返回 nil 表示它没说 SMB2。
+// 返回 nil 表示它没说 SMB2。
+//
+// 通配符 "SMB 2.???" 只说明「SMB2 里随便挑一个」，Windows 7 也发它，而它只到
+// 2.1——所以通配符最多补到 2.1，除非客户端另外显式列了更高的方言。
 func smb1SMB2Dialects(msg []byte) []uint16 {
 	var out []uint16
-	for _, w := range smb1DeclaredDialects(msg) {
-		switch w {
-		case dialect202, dialect210, dialect300, dialect302:
-			out = appendDialect(out, w)
-		case smb1WildcardSMB2:
-			for _, d := range []uint16{dialect202, dialect210, dialect300, dialect302} {
+	wildcard := false
+	for _, name := range smb1DeclaredDialects(msg) {
+		switch name {
+		case "SMB 2.002":
+			out = appendDialect(out, dialect202)
+		case "SMB 2.1":
+			out = appendDialect(out, dialect210)
+		case "SMB 3.0", "SMB 3.00":
+			out = appendDialect(out, dialect300)
+		case "SMB 3.02", "SMB 3.0.2":
+			out = appendDialect(out, dialect302)
+		case "SMB 2.???":
+			wildcard = true
+		}
+	}
+	if wildcard {
+		top := uint16(dialect210)
+		for _, d := range out {
+			if d > top {
+				top = d
+			}
+		}
+		for _, d := range []uint16{dialect202, dialect210, dialect300, dialect302} {
+			if d <= top {
 				out = appendDialect(out, d)
 			}
 		}
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out
 }
 
-// smb1DeclaredDialects 读方言清单原文。结构不认得就返回 nil。
-func smb1DeclaredDialects(msg []byte) []uint16 {
+// smb1DeclaredDialects 读方言清单原文（ASCII 名字）。
+//
+// 布局不是 WORD 数组：每项是 <BufferFormat=0x02><DialectString><NUL>。
+// 结构不认得就返回 nil。
+func smb1DeclaredDialects(msg []byte) []string {
 	if len(msg) < smb1DialectsOff || msg[smb1HeaderLen] != 0 {
 		return nil
 	}
@@ -93,9 +120,18 @@ func smb1DeclaredDialects(msg []byte) []uint16 {
 	if n < 2 || smb1DialectsOff+n > len(msg) {
 		return nil
 	}
-	out := make([]uint16, 0, n/2)
-	for i := 0; i+1 < n; i += 2 {
-		out = append(out, binary.LittleEndian.Uint16(msg[smb1DialectsOff+i:]))
+	var out []string
+	buf := msg[smb1DialectsOff : smb1DialectsOff+n]
+	for len(buf) > 0 {
+		if buf[0] != 0x02 { // 下一项必须是 BufferFormat
+			return nil
+		}
+		end := bytes.IndexByte(buf[1:], 0)
+		if end < 0 {
+			return nil
+		}
+		out = append(out, string(buf[1:1+end]))
+		buf = buf[2+end:]
 	}
 	return out
 }
@@ -131,7 +167,7 @@ func smb1ParseReport(msg []byte) string {
 	}
 	wc := msg[smb1HeaderLen]
 	bc := int(binary.LittleEndian.Uint16(msg[smb1HeaderLen+1:]))
-	return fmt.Sprintf("  协议：SMB1，cmd=0x%02x，WordCount=%d，ByteCount=%d，声明的方言 % x\n",
+	return fmt.Sprintf("  协议：SMB1，cmd=0x%02x，WordCount=%d，ByteCount=%d，声明的方言 %q\n",
 		msg[4], wc, bc, smb1DeclaredDialects(msg))
 }
 

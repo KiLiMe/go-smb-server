@@ -1,5 +1,11 @@
 package transport
 
+import (
+	"encoding/binary"
+	"fmt"
+	"os"
+)
+
 // SMB1 多协议协商的垫片。
 //
 // Windows 客户端在「SMB1 客户端仍然启用」时会先发一个 SMB1 NEGOTIATE，方言表里
@@ -9,14 +15,23 @@ package transport
 // WinPE / 未关 SMB1 的机器表现为「无法连接」。
 //
 // 处理方式：把这一帧整个换成一个等价的 SMB2 NEGOTIATE 请求交回正常流程，
-// 让库自己挑方言、发响应。不解析 SMB1 的 body——方言表对结果没有影响，库里
-// 已经有自己的方言阶梯，客户端拿到的响应是它认得的格式。同类做法可参照
-// goshs 的 smbserver/server.go:412（MIT）与 macos-fuse-t/go-smb2 的
-// server/server.go:649。
+// 让库自己挑方言、发响应。
+//
+// 方言清单必须从 SMB1 的 body 里读出来：Windows 只接受它自己列过的方言，
+// 报一个它没列的（例如对着 Win7 内核的 PE 报 3.0.2）会直接被它掉头关连接。
+// goshs（smbserver/server.go:412）与 macos-fuse-t/go-smb2（server/server.go:649）
+// 都不读这一段，直接报最高方言——对它们够用，对老 PE 不够。
 
 const (
 	smb1ProtocolID   = "\xffSMB"
 	smb1CmdNegotiate = 0x72
+
+	// SMB1 NEGOTIATE 请求的固定偏移：头 32 字节，WordCount 必为 0，
+	// 随后是 ByteCount（WORD）和方言清单（每个方言一个 WORD）。
+	smb1HeaderLen   = 32
+	smb1DialectsOff = 35
+	// 「SMB 2.???」通配：客户端说「SMB2/3 随你挑多高的」。
+	smb1WildcardSMB2 = 0x02FF
 
 	// SMB2 头部与 NEGOTIATE 请求体的固定长度。
 	smb2HeaderLen    = 64
@@ -41,8 +56,61 @@ func upgradeSMB1Negotiate(msg []byte) ([]byte, bool) {
 	if !isSMB1Negotiate(msg) {
 		return nil, false
 	}
-	return buildSMB2Negotiate(), true
+	dialects := smb1SMB2Dialects(msg)
+	if len(dialects) == 0 {
+		// 只列了 SMB1 方言：这种客户端本来就不是 SMB2 的活儿，别硬装。
+		return nil, false
+	}
+	if debugSMB1() {
+		fmt.Fprintf(os.Stderr, "[smb1] 客户端声明 % x → 提交 % x\n", smb1DeclaredDialects(msg), dialects)
+	}
+	return buildSMB2Negotiate(dialects), true
 }
+
+// smb1SMB2Dialects 挑出客户端声明过的 SMB2 方言，按升序去重。
+// 「SMB 2.???」通配展开成整条阶梯。返回 nil 表示它没说 SMB2。
+func smb1SMB2Dialects(msg []byte) []uint16 {
+	var out []uint16
+	for _, w := range smb1DeclaredDialects(msg) {
+		switch w {
+		case dialect202, dialect210, dialect300, dialect302:
+			out = appendDialect(out, w)
+		case smb1WildcardSMB2:
+			for _, d := range []uint16{dialect202, dialect210, dialect300, dialect302} {
+				out = appendDialect(out, d)
+			}
+		}
+	}
+	return out
+}
+
+// smb1DeclaredDialects 读方言清单原文。结构不认得就返回 nil。
+func smb1DeclaredDialects(msg []byte) []uint16 {
+	if len(msg) < smb1DialectsOff || msg[smb1HeaderLen] != 0 {
+		return nil
+	}
+	n := int(binary.LittleEndian.Uint16(msg[smb1HeaderLen+1:]))
+	if n < 2 || smb1DialectsOff+n > len(msg) {
+		return nil
+	}
+	out := make([]uint16, 0, n/2)
+	for i := 0; i+1 < n; i += 2 {
+		out = append(out, binary.LittleEndian.Uint16(msg[smb1DialectsOff+i:]))
+	}
+	return out
+}
+
+func appendDialect(out []uint16, d uint16) []uint16 {
+	for _, have := range out {
+		if have == d {
+			return out
+		}
+	}
+	return append(out, d)
+}
+
+// debugSMB1 打开后把客户端声明的方言打到 stderr，现场排查用（默认关）。
+func debugSMB1() bool { return os.Getenv("SMBDEMO_DEBUG_SMB1") != "" }
 
 // buildSMB2Negotiate 造一个最小但合法的 SMB2 NEGOTIATE 请求。
 //
@@ -50,8 +118,7 @@ func upgradeSMB1Negotiate(msg []byte) ([]byte, bool) {
 // CreditRequest=1，其余为 0（MessageId/SessionId 在协商阶段就是 0）。
 // 请求体（36 字节）：StructureSize=36 + DialectCount + SecurityMode=1
 // （允许签名，MS-SMB2 §3.2.5.2 说缺这一位 Windows 应当拒绝）+ 方言表。
-func buildSMB2Negotiate() []byte {
-	dialects := []uint16{dialect202, dialect210, dialect300, dialect302}
+func buildSMB2Negotiate(dialects []uint16) []byte {
 	buf := make([]byte, smb2HeaderLen+smb2NegotBody+2*len(dialects))
 
 	buf[0], buf[1], buf[2], buf[3] = 0xFE, 'S', 'M', 'B'

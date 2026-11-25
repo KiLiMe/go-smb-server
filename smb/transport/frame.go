@@ -30,16 +30,34 @@ type FramedConn struct {
 	rawConn net.Conn
 	readBuf []byte
 	hdrBuf  [HeaderLen]byte
+	// 首帧里夹着 SMB1 多协议协商的话只换一次，后续帧一律原样通过。
+	firstFrame bool
 }
 
 func NewFramedConn(c net.Conn) *FramedConn {
-	fc := &FramedConn{r: c, w: c, rawConn: c}
+	fc := &FramedConn{r: c, w: c, rawConn: c, firstFrame: true}
 	readBuf := make([]byte, 0, 64<<10)
 	fc.readBuf = readBuf[:0]
 	return fc
 }
 
+// ReadMessage 读一帧。首帧如果是 SMB1 NEGOTIATE，换成 SMB2 NEGOTIATE 请求再交出去：
+// 未关 SMB1 的 Windows/WinPE 客户端会先发这一帧，不换它就死在 bad protocol id 上。
 func (f *FramedConn) ReadMessage() ([]byte, error) {
+	msg, err := f.readFrame()
+	if err != nil {
+		return nil, err
+	}
+	if f.firstFrame {
+		f.firstFrame = false
+		if upgraded, ok := upgradeSMB1Negotiate(msg); ok {
+			return upgraded, nil
+		}
+	}
+	return msg, nil
+}
+
+func (f *FramedConn) readFrame() ([]byte, error) {
 	if _, err := io.ReadFull(f.r, f.hdrBuf[:]); err != nil {
 		return nil, fmt.Errorf("transport: read frame header: %w", err)
 	}
